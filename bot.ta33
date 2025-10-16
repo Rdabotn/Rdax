@@ -1,0 +1,509 @@
+# -*- coding: utf-8 -*-
+
+import telebot
+from telebot import types
+import requests, random, json, sqlite3
+
+# بدل هذا التوكن، خلي توكن البوت مالتك
+API_TOKEN = '6243223590:AAEi0el_WCGnB0P57aTTP3Wt149WJNaNpCA'
+# بدل هذا الآيدي، خلي ايدي حسابك
+DEV_ID = 6878196064
+# معرف البوت مالتك
+BOT_USER = "@xrdabot"
+
+admin_states = {}
+DB_FILE = "bot1_data.json"
+
+bot = telebot.TeleBot(API_TOKEN)
+
+conn = sqlite3.connect("bot.db", check_same_thread=False)
+cur = conn.cursor()
+cur.execute("""CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY, name TEXT, username TEXT)""")
+cur.execute("""CREATE TABLE IF NOT EXISTS chats(chat_id INTEGER PRIMARY KEY, type TEXT, owner_id INTEGER)""")
+conn.commit()
+
+def load_data():
+    try:
+        with open(DB_FILE, 'r', encoding='utf-8') as f: return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {
+            "reactions": {}, "chat_reactions": {}, "bot_on": True, "join_notification": True,
+            "block_notification": True, "force_channel": None, "replies": {}, 
+            "user_custom_reactions": {}, "start_message": None
+        }
+
+def save_data(data):
+    with open(DB_FILE, 'w', encoding='utf-8') as f: json.dump(data, f, ensure_ascii=False, indent=4)
+
+def get_main_developer_keyboard():
+    data = load_data()
+    bot_status = "✅" if data.get("bot_on", True) else "❌"
+    join_status = "✅" if data.get("join_notification", True) else "❌"
+    block_status = "💡" if data.get("block_notification", True) else "⚫️"
+    mrk = types.InlineKeyboardMarkup(row_width=2)
+    mrk.add(types.InlineKeyboardButton(f"إشعار الدخول {join_status}", callback_data='toggle_join'),
+            types.InlineKeyboardButton(f"إشعار الحظر {block_status}", callback_data='toggle_block'))
+    mrk.add(types.InlineKeyboardButton("📊 قسم الإحصائيات", callback_data='stats_menu'),
+            types.InlineKeyboardButton("📻 قسم الإذاعة", callback_data='broadcast_menu'))
+    mrk.add(types.InlineKeyboardButton("🔗 ق.الاشتراك الإجباري", callback_data='force_join_menu'),
+            types.InlineKeyboardButton("💬 ق.الردود والأوامر", callback_data='replies_menu'))
+    mrk.add(types.InlineKeyboardButton("👍 قسم التفاعلات", callback_data='reactions_menu'),
+            types.InlineKeyboardButton("🚀 قسم الأستارت", callback_data='start_menu'))
+    mrk.add(types.InlineKeyboardButton(f"حالة البوت {bot_status}", callback_data='toggle_bot'),
+            types.InlineKeyboardButton("❌ إغلاق", callback_data='close_panel'))
+    return mrk
+
+def get_start_menu_keyboard():
+    mrk = types.InlineKeyboardMarkup(row_width=2)
+    mrk.add(types.InlineKeyboardButton("✏️ تعيين كليشة", callback_data='set_start_msg'),
+            types.InlineKeyboardButton("👁️ عرض الكليشة", callback_data='view_start_msg'))
+    mrk.add(types.InlineKeyboardButton("🗑️ حذف كليشة", callback_data='delete_start_msg'),
+            types.InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main'))
+    return mrk
+
+def get_broadcast_keyboard():
+    mrk = types.InlineKeyboardMarkup(row_width=2)
+    mrk.add(types.InlineKeyboardButton("📢 إذاعة للجميع", callback_data='brd_all_text'),
+            types.InlineKeyboardButton("👤 إذاعة للأعضاء فقط", callback_data='brd_users_text'))
+    mrk.add(types.InlineKeyboardButton("↪️ توجيه للجميع", callback_data='brd_all_fwd'),
+            types.InlineKeyboardButton("👤 توجيه للأعضاء فقط", callback_data='brd_users_fwd'))
+    mrk.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main'))
+    return mrk
+
+def get_stats_keyboard():
+    mrk = types.InlineKeyboardMarkup(row_width=1)
+    mrk.add(types.InlineKeyboardButton("👤 المستخدمين", callback_data='show_stats_users'),
+            types.InlineKeyboardButton("👥 المجموعات", callback_data='show_stats_groups'),
+            types.InlineKeyboardButton("📢 القنوات", callback_data='show_stats_channels'))
+    mrk.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main'))
+    return mrk
+    
+def get_replies_keyboard():
+    mrk = types.InlineKeyboardMarkup(row_width=2)
+    mrk.add(types.InlineKeyboardButton("➕ إضافة رد/أمر", callback_data='add_reply'),
+            types.InlineKeyboardButton("🗑️ حذف رد/أمر", callback_data='delete_reply'))
+    mrk.add(types.InlineKeyboardButton("📋 عرض الكل", callback_data='list_replies'))
+    mrk.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main'))
+    return mrk
+
+def get_reactions_keyboard():
+    mrk = types.InlineKeyboardMarkup(row_width=2)
+    mrk.add(types.InlineKeyboardButton("➕ إضافة تفاعل", callback_data='add_reaction'),
+            types.InlineKeyboardButton("🗑️ حذف تفاعل", callback_data='delete_reaction'))
+    mrk.add(types.InlineKeyboardButton("📋 عرض الكل", callback_data='list_reactions'))
+    mrk.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main'))
+    return mrk
+
+def check_subscription(user_id):
+    channel = load_data().get("force_channel")
+    if not channel: return True
+    try:
+        return bot.get_chat_member(chat_id=channel, user_id=user_id).status in ["member", "administrator", "creator"]
+    except: return False
+
+def get_user_main_keyboard(user_id):
+    cur.execute("SELECT chat_id, type FROM chats WHERE owner_id=?", (user_id,))
+    chats = cur.fetchall()
+    mrk = types.InlineKeyboardMarkup(row_width=1)
+    if chats:
+        for (chat_id, chat_type) in chats:
+            try:
+                chat_info = bot.get_chat(chat_id)
+                chat_name = chat_info.title
+                mrk.add(types.InlineKeyboardButton(f"{'📢' if chat_type == 'channel' else '👥'} {chat_name}", callback_data=f'manage_chat_{chat_id}'))
+            except Exception as e:
+                print(f"Failed to get chat info for {chat_id}: {e}. Removing chat from DB.")
+                cur.execute("DELETE FROM chats WHERE chat_id=? AND owner_id=?", (chat_id, user_id))
+                conn.commit()
+
+    mrk.add(types.InlineKeyboardButton("➕ اضفني إلى مجموعة جديدة", url=f"https://t.me/{BOT_USER[1:]}?startgroup"))
+    mrk.add(types.InlineKeyboardButton("➕ اضفني إلى قناة جديدة", url=f"https://t.me/{BOT_USER[1:]}?startchannel=true"))
+    
+    return mrk
+
+def get_chat_management_keyboard(chat_id):
+    mrk = types.InlineKeyboardMarkup(row_width=1)
+    mrk.add(types.InlineKeyboardButton("🎭 قسم تفاعلاتك", callback_data=f'user_reactions_menu_{chat_id}'))
+    mrk.add(types.InlineKeyboardButton("🗑️ حذف هذه الدردشة من قائمتي", callback_data=f'delete_chat_{chat_id}'))
+    mrk.add(types.InlineKeyboardButton("🔙 رجوع للقائمة الرئيسية", callback_data='back_to_user_main'))
+    return mrk
+
+def get_user_reactions_menu_keyboard(chat_id):
+    mrk = types.InlineKeyboardMarkup(row_width=1)
+    mrk.add(types.InlineKeyboardButton("➕ تعيين تفاعل مخصص", callback_data=f'set_custom_reaction_{chat_id}'))
+    mrk.add(types.InlineKeyboardButton("🗑️ حذف تفاعل مخصص", callback_data=f'delete_custom_reaction_{chat_id}'))
+    mrk.add(types.InlineKeyboardButton("📋 تفاعلاتك المخصصة", callback_data=f'list_custom_reactions_{chat_id}'))
+    mrk.add(types.InlineKeyboardButton("🔙 رجوع", callback_data=f'manage_chat_{chat_id}'))
+    return mrk
+
+def get_chat_reactions(chat_id, user_id=None):
+    data = load_data()
+    
+    if user_id:
+        user_custom = data.get("user_custom_reactions", {}).get(str(user_id), {}).get(str(chat_id), [])
+        if user_custom:
+            return user_custom
+    
+    chat_reactions = data.get("chat_reactions", {})
+    if str(chat_id) in chat_reactions:
+        return chat_reactions[str(chat_id)]
+
+    try:
+        chat_info = bot.get_chat(chat_id)
+        if chat_info.available_reactions:
+            emojis = []
+            for reaction in chat_info.available_reactions:
+                if isinstance(reaction, types.ReactionTypeEmoji):
+                    emojis.append(reaction.emoji)
+            if emojis:
+                chat_reactions[str(chat_id)] = emojis
+                data["chat_reactions"] = chat_reactions
+                save_data(data)
+                return emojis
+    except Exception as e:
+        print(f"Failed to get chat reactions: {e}")
+    
+    developer_reactions = list(data.get("reactions", {}).keys())
+    return developer_reactions if developer_reactions else []
+
+def react_to_message(message):
+    data = load_data()
+    if data.get("bot_on", True):
+        temp_cur = conn.cursor()
+        temp_cur.execute("SELECT owner_id FROM chats WHERE chat_id=?", (message.chat.id,))
+        result = temp_cur.fetchone()
+        temp_cur.close()
+        owner_id = result[0] if result else None
+        
+        reactions = get_chat_reactions(message.chat.id, owner_id)
+        
+        if reactions:
+            try:
+                emoji = random.choice(reactions)
+                reaction_emoji = types.ReactionTypeEmoji(emoji)
+                bot.set_message_reaction(chat_id=message.chat.id, message_id=message.message_id, reaction=[reaction_emoji])
+            except Exception as e:
+                print(f"!!! خطأ في وضع التفاعل: {e}")
+
+def format_start_message(message_text, user):
+    if not message_text:
+        return None
+    user_link = f'<a href="tg://user?id={user.id}">{user.first_name}</a>'
+    return message_text.replace('{}', user_link)
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    user_id, name, uname = message.from_user.id, message.from_user.first_name, message.from_user.username
+    if user_id == DEV_ID:
+        bot.send_message(user_id, 'أهلاً بك يا مطور، لوحة التحكم تحت أمرك:', reply_markup=get_main_developer_keyboard())
+        return
+
+    if message.chat.type == "private":
+        cur.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+        is_new_user = not cur.fetchone()
+        
+        if is_new_user:
+            cur.execute("INSERT INTO users(user_id,name,username) VALUES(?,?,?)", (user_id, name, uname))
+            conn.commit()
+            data = load_data()
+            if data.get("join_notification"):
+                total_users = cur.execute('SELECT COUNT(user_id) FROM users').fetchone()[0]
+                user_link_button = types.InlineKeyboardMarkup()
+                user_link_button.add(types.InlineKeyboardButton(name, url=f"tg://user?id={user_id}"))
+                bot.send_message(DEV_ID, 
+                    f"👤 دخـول جـديـد\n• الاسـم: {name}\n• المعـرف: @{uname if uname else 'بدون معرف'}\n• الايـدي: `{user_id}`\n\nالعدد الكلي للمستخدمين: {total_users}", 
+                    parse_mode="Markdown",
+                    reply_markup=user_link_button)
+        
+        if not check_subscription(user_id):
+            data = load_data()
+            channel = data.get("force_channel", "").replace('@', '')
+            mrk = types.InlineKeyboardMarkup()
+            mrk.add(types.InlineKeyboardButton("✅ اشترك في القناة", url=f"https://t.me/{channel}"), types.InlineKeyboardButton("🔄 تحقق", callback_data="check_sub"))
+            bot.send_message(user_id, "⚠️ عذراً، يجب عليك الاشتراك في قناة البوت أولاً.", reply_markup=mrk)
+            return
+        
+        data = load_data()
+        start_msg = data.get("start_message")
+        if start_msg:
+            formatted_msg = format_start_message(start_msg, message.from_user)
+            if formatted_msg:
+                bot.send_message(user_id, formatted_msg, parse_mode="HTML", reply_markup=get_user_main_keyboard(user_id))
+            else:
+                bot.send_message(user_id, f"أهلاً بك {name} في بوت التفاعلات 🌹\n\nالقنوات والمجموعات التي تم إضافتي إليها:", reply_markup=get_user_main_keyboard(user_id))
+        else:
+            bot.send_message(user_id, f"أهلاً بك {name} في بوت التفاعلات 🌹\n\nالقنوات والمجموعات التي تم إضافتي إليها:", reply_markup=get_user_main_keyboard(user_id))
+
+@bot.my_chat_member_handler()
+def handle_chat_member_updates(message: types.ChatMemberUpdated):
+    chat_id, chat_type, owner_id = message.chat.id, message.chat.type, message.from_user.id
+    
+    if message.new_chat_member.status in ['member', 'administrator']:
+        cur.execute("INSERT OR IGNORE INTO chats(chat_id,type,owner_id) VALUES(?,?,?)", (chat_id, chat_type, owner_id))
+        conn.commit()
+        if message.new_chat_member.status == 'administrator' and message.new_chat_member.user.id == bot.get_me().id:
+            try:
+                bot.send_message(owner_id, 
+                                 f"أهلاً بك {message.from_user.first_name} 👋\n\nشكراً لك لرفعك لي مشرفاً في `{message.chat.title}`! 🎉\n\n"
+                                 "تمت إضافتك إلى لوحة التحكم الخاصة بالبوت.", 
+                                 reply_markup=get_user_main_keyboard(owner_id))
+            except Exception as e:
+                print(f"Failed to send private welcome message, sending to chat: {e}")
+                bot.send_message(chat_id, "شكراً لرفعك لي مشرفاً! الآن يمكنني المساعدة في إدارة مجموعتكم. 🎉")
+    elif message.new_chat_member.status in ['left', 'kicked']:
+        cur.execute("DELETE FROM chats WHERE chat_id=?", (chat_id,))
+        conn.commit()
+    if message.chat.type == 'private' and message.new_chat_member.status == 'kicked':
+        data = load_data()
+        if data.get("block_notification"):
+            bot.send_message(DEV_ID, f"⚫️ قام أحد المستخدمين بحظر البوت:\n• الاسم: {message.from_user.full_name}\n• الايدي: `{message.from_user.id}`", parse_mode="Markdown")
+        cur.execute("DELETE FROM users WHERE user_id=?", (message.from_user.id,))
+        conn.commit()
+
+ALL_CONTENT_TYPES = ['text', 'photo', 'video', 'sticker', 'animation', 'document', 'voice', 'audio']
+
+@bot.channel_post_handler(content_types=ALL_CONTENT_TYPES)
+def handle_channel_posts(message):
+    react_to_message(message)
+
+@bot.edited_channel_post_handler(content_types=ALL_CONTENT_TYPES)
+def handle_edited_channel_posts(message):
+    react_to_message(message)
+
+@bot.callback_query_handler(func=lambda call: call.from_user.id != DEV_ID)
+def user_callback_handler(call):
+    user_id = call.from_user.id
+    if call.data == 'check_sub':
+        if check_subscription(user_id):
+            bot.answer_callback_query(call.id, "✅ شكراً لاشتراكك!")
+            data = load_data()
+            start_msg = data.get("start_message")
+            if start_msg:
+                formatted_msg = format_start_message(start_msg, call.from_user)
+                if formatted_msg:
+                    bot.edit_message_text(formatted_msg, call.message.chat.id, call.message.message_id, parse_mode="HTML", reply_markup=get_user_main_keyboard(user_id))
+                else:
+                    bot.edit_message_text(f"أهلاً بك مجدداً {call.from_user.first_name} 🌹\n\nالقنوات والمجموعات التي تم إضافتي إليها:", call.message.chat.id, call.message.message_id, reply_markup=get_user_main_keyboard(user_id))
+            else:
+                bot.edit_message_text(f"أهلاً بك مجدداً {call.from_user.first_name} 🌹\n\nالقنوات والمجموعات التي تم إضافتي إليها:", call.message.chat.id, call.message.message_id, reply_markup=get_user_main_keyboard(user_id))
+        else:
+            bot.answer_callback_query(call.id, "❌ لم تشترك بعد!", show_alert=True)
+    elif call.data.startswith('manage_chat_'):
+        chat_id = call.data.split('_')[2]
+        try:
+            chat_info = bot.get_chat(chat_id)
+            chat_name = chat_info.title
+            bot.edit_message_text(f"إدارة `{chat_name}`:", call.message.chat.id, call.message.message_id, reply_markup=get_chat_management_keyboard(chat_id), parse_mode="Markdown")
+        except Exception as e:
+            bot.edit_message_text("❌ لم أتمكن من العثور على هذه الدردشة. ربما تم حظري منها.", call.message.chat.id, call.message.message_id, reply_markup=get_user_main_keyboard(user_id))
+    elif call.data.startswith('user_reactions_menu_'):
+        chat_id = call.data.split('_')[3]
+        try:
+            chat_info = bot.get_chat(chat_id)
+            chat_name = chat_info.title
+            bot.edit_message_text(f"🎭 قسم تفاعلاتك لـ `{chat_name}`:", call.message.chat.id, call.message.message_id, reply_markup=get_user_reactions_menu_keyboard(chat_id), parse_mode="Markdown")
+        except:
+            bot.answer_callback_query(call.id, "حدث خطأ!", show_alert=True)
+    elif call.data.startswith('set_custom_reaction_'):
+        chat_id = call.data.split('_')[3]
+        admin_states[user_id] = f'awaiting_custom_reaction_{chat_id}'
+        bot.answer_callback_query(call.id)
+        bot.send_message(user_id, "أرسل التفاعل (الإيموجي) الذي تريد إضافته علما ايموجي واحد في كل مرة :")
+    elif call.data.startswith('delete_custom_reaction_'):
+        chat_id = call.data.split('_')[3]
+        admin_states[user_id] = f'awaiting_delete_custom_reaction_{chat_id}'
+        bot.answer_callback_query(call.id)
+        bot.send_message(user_id, "أرسل التفاعل (الإيموجي) الذي تريد حذفه:")
+    elif call.data.startswith('list_custom_reactions_'):
+        chat_id = call.data.split('_')[3]
+        data = load_data()
+        user_reactions = data.get("user_custom_reactions", {}).get(str(user_id), {}).get(str(chat_id), [])
+        if user_reactions:
+            text = f"📋 تفاعلاتك المخصصة:\n" + "\n".join([f"`{r}`" for r in user_reactions])
+        else:
+            text = "لا توجد تفاعلات مخصصة. البوت يستخدم تفاعلات عشوائية من قائمة المطور."
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=get_user_reactions_menu_keyboard(chat_id), parse_mode="Markdown")
+    elif call.data.startswith('delete_chat_'):
+        chat_id = call.data.split('_')[2]
+        cur.execute("DELETE FROM chats WHERE chat_id=? AND owner_id=?", (chat_id, user_id))
+        conn.commit()
+        bot.answer_callback_query(call.id, "تم الحذف بنجاح!")
+        bot.edit_message_text(f"أهلاً بك {call.from_user.first_name} في بوت التفاعلات \n\nالقنوات والمجموعات التي تم إضافتي إليها:", call.message.chat.id, call.message.message_id, reply_markup=get_user_main_keyboard(user_id))
+    elif call.data == 'back_to_user_main':
+        bot.edit_message_text(f"أهلاً بك {call.from_user.first_name} في بوت التفاعلات \n\nالقنوات والمجموعات التي تم إضافتي إليها:", call.message.chat.id, call.message.message_id, reply_markup=get_user_main_keyboard(user_id))
+
+@bot.callback_query_handler(func=lambda call: call.from_user.id == DEV_ID)
+def developer_callback(call):
+    global admin_states; data = load_data()
+    if call.data == 'back_to_main': 
+        bot.edit_message_text('القائمة الرئيسية:', call.message.chat.id, call.message.message_id, reply_markup=get_main_developer_keyboard())
+    elif call.data == 'close_panel': 
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    elif call.data.startswith('toggle_'):
+        key_map = {'toggle_bot': 'bot_on', 'toggle_join': 'join_notification', 'toggle_block': 'block_notification'}
+        key = key_map.get(call.data)
+        if key: 
+            data[key] = not data.get(key, False)
+            save_data(data)
+            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=get_main_developer_keyboard())
+            bot.answer_callback_query(call.id, "تم تغيير الحالة!")
+    elif call.data == 'start_menu':
+        bot.edit_message_text('🚀 قسم الأستارت:', call.message.chat.id, call.message.message_id, reply_markup=get_start_menu_keyboard())
+    elif call.data == 'set_start_msg':
+        admin_states[DEV_ID] = 'awaiting_start_message'
+        bot.answer_callback_query(call.id)
+        bot.send_message(DEV_ID, "أرسل كليشة الاستارت الجديدة.\n\nملاحظة: استخدم {} لإدراج اسم المستخدم مع رابط لحسابه.")
+    elif call.data == 'view_start_msg':
+        start_msg = data.get("start_message")
+        if start_msg:
+            bot.edit_message_text(f"📄 كليشة الاستارت الحالية:\n\n{start_msg}", call.message.chat.id, call.message.message_id, reply_markup=get_start_menu_keyboard())
+        else:
+            bot.edit_message_text("❌ لا توجد كليشة محفوظة.", call.message.chat.id, call.message.message_id, reply_markup=get_start_menu_keyboard())
+    elif call.data == 'delete_start_msg':
+        data['start_message'] = None
+        save_data(data)
+        bot.answer_callback_query(call.id, "✅ تم حذف الكليشة!")
+        bot.edit_message_text('🚀 قسم الأستارت:', call.message.chat.id, call.message.message_id, reply_markup=get_start_menu_keyboard())
+    elif call.data == 'stats_menu':
+        bot.edit_message_text("اختر لعرض الإحصائية:", call.message.chat.id, call.message.message_id, reply_markup=get_stats_keyboard())
+    elif call.data.startswith('show_stats_'):
+        bot.answer_callback_query(call.id)
+        new_text = ""
+        if call.data == 'show_stats_users': 
+            new_text = f"👤 عدد المستخدمين في البوت: {cur.execute('SELECT COUNT(user_id) FROM users').fetchone()[0]}"
+        elif call.data == 'show_stats_groups': 
+            new_text = f"👥 عدد المجموعات المفعلة: {cur.execute('SELECT COUNT(chat_id) FROM chats WHERE type IN (?, ?)', ('group', 'supergroup')).fetchone()[0]}"
+        elif call.data == 'show_stats_channels': 
+            new_text = f"📢 عدد القنوات المفعلة: {cur.execute('SELECT COUNT(chat_id) FROM chats WHERE type=?', ('channel',)).fetchone()[0]}"
+        if new_text:
+            bot.edit_message_text(new_text, call.message.chat.id, call.message.message_id, reply_markup=get_stats_keyboard())
+    elif call.data == 'broadcast_menu': 
+        bot.edit_message_text("اختر نوع الإذاعة:", call.message.chat.id, call.message.message_id, reply_markup=get_broadcast_keyboard())
+    elif call.data in ['brd_all_text', 'brd_users_text', 'brd_all_fwd', 'brd_users_fwd']:
+        admin_states[DEV_ID] = call.data
+        msg = "أرسل نص الإذاعة الآن..." if 'text' in call.data else "وجّه الرسالة التي تريد إذاعتها الآن..."
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, msg)
+    elif call.data == 'replies_menu': 
+        bot.edit_message_text('💬 قسم التحكم بالردود والأوامر المخصصة:', call.message.chat.id, call.message.message_id, reply_markup=get_replies_keyboard())
+    elif call.data == 'list_replies':
+        replies = data.get("replies", {})
+        text = "📋 الردود/الأوامر الحالية:\n" + "\n".join([f"• `{key}`" for key in replies.keys()]) if replies else "لا توجد ردود حالياً."
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=get_replies_keyboard(), parse_mode='Markdown')
+    elif call.data == 'add_reply': 
+        admin_states[DEV_ID] = 'awaiting_reply_add'
+        bot.edit_message_text('دزلي الكلمة أو الأمر (الزناد). مثال: /help', call.message.chat.id, call.message.message_id)
+    elif call.data == 'delete_reply': 
+        admin_states[DEV_ID] = 'awaiting_reply_delete'
+        bot.edit_message_text('دزلي الكلمة اللي تريد تحذف الرد مالتها.', call.message.chat.id, call.message.message_id)
+    elif call.data == 'force_join_menu':
+        channel = data.get('force_channel') or "لا يوجد"
+        msg_text = f"🔗 قناة الاشتراك الإجباري الحالية:\n`{channel}`"
+        mrk = types.InlineKeyboardMarkup()
+        mrk.add(types.InlineKeyboardButton("➕ تغيير القناة", callback_data='set_channel'), 
+                types.InlineKeyboardButton("🗑️ حذف القناة", callback_data='del_channel'))
+        mrk.add(types.InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main'))
+        bot.edit_message_text(msg_text, call.message.chat.id, call.message.message_id, reply_markup=mrk, parse_mode="Markdown")
+    elif call.data == 'set_channel': 
+        admin_states[DEV_ID] = 'awaiting_channel'
+        bot.send_message(call.message.chat.id, "دزلي معرف القناة (مثال: @iraq_dev)")
+        bot.answer_callback_query(call.id)
+    elif call.data == 'del_channel': 
+        data['force_channel'] = None
+        save_data(data)
+        bot.answer_callback_query(call.id, "🗑️ تم حذف القناة.")
+        call.data = 'force_join_menu'
+        developer_callback(call)
+    elif call.data == 'reactions_menu': 
+        bot.edit_message_text('👍 قسم التحكم بالتفاعلات:', call.message.chat.id, call.message.message_id, reply_markup=get_reactions_keyboard())
+    elif call.data == 'list_reactions':
+        reactions = list(data.get("reactions", {}).keys())
+        text = "📋 التفاعلات الحالية (لإضافة تفاعل ثابت):\n" + "\n".join([f"`{e}`" for e in reactions]) if reactions else "لا توجد تفاعلات ثابتة."
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=get_reactions_keyboard(), parse_mode='Markdown')
+    elif call.data == 'add_reaction': 
+        admin_states[DEV_ID] = 'awaiting_reaction_add'
+        bot.edit_message_text('دزلي الايموجي اللي تريد تضيفه.', call.message.chat.id, call.message.message_id)
+    elif call.data == 'delete_reaction': 
+        admin_states[DEV_ID] = 'awaiting_reaction_delete'
+        bot.edit_message_text('دزلي الايموجي اللي تريد تحذفه.', call.message.chat.id, call.message.message_id)
+
+@bot.message_handler(func=lambda message: True, content_types=ALL_CONTENT_TYPES)
+def general_message_handler(message):
+    global admin_states
+    user_id = message.from_user.id
+    
+    if user_id in admin_states:
+        state = admin_states.pop(user_id) if user_id == DEV_ID else admin_states.get(user_id)
+        data = load_data()
+        
+        if user_id == DEV_ID:
+            if state in ['brd_all_text', 'brd_users_text', 'brd_all_fwd', 'brd_users_fwd']:
+                bot.send_message(user_id, "جاري بدء العملية...")
+                user_ids = cur.execute("SELECT user_id FROM users").fetchall()
+                chat_ids = cur.execute("SELECT chat_id FROM chats").fetchall()
+                all_ids = user_ids + chat_ids if 'all' in state else user_ids
+                for (uid,) in all_ids:
+                    try:
+                        if 'text' in state: bot.copy_message(uid, message.chat.id, message.message_id)
+                        elif 'fwd' in state: bot.forward_message(uid, message.chat.id, message.message_id)
+                    except: pass
+                bot.send_message(user_id, "✅ تمت العملية بنجاح.")
+            elif state == 'awaiting_reply_add':
+                admin_states[user_id] = {'new_reply_trigger': message.text}
+                bot.send_message(user_id, f"تمام، هسه دزلي الرد اللي تريده للكلمة: `{message.text}`", parse_mode="Markdown")
+            elif isinstance(admin_states.get(user_id), dict) and 'new_reply_trigger' in admin_states.get(user_id):
+                trigger = admin_states.pop(user_id)['new_reply_trigger']
+                reply_content = {'type': message.content_type, 'id': message.text or message.json['photo'][-1]['file_id'] if message.photo else message.json[message.content_type]['file_id']}
+                data.setdefault('replies', {})[trigger] = reply_content
+                save_data(data)
+                bot.send_message(user_id, f"✅ تم حفظ الرد بنجاح للكلمة: `{trigger}`", parse_mode="Markdown")
+            elif state == 'awaiting_reply_delete':
+                if message.text in data.get('replies', {}): 
+                    del data['replies'][message.text]
+                    save_data(data)
+                    bot.send_message(user_id, f"🗑️ تم حذف الرد الخاص بـ `{message.text}`.", parse_mode="Markdown")
+                else: 
+                    bot.send_message(user_id, "❌ الكلمة غير موجودة أصلاً.")
+            elif state == 'awaiting_channel': 
+                data['force_channel'] = message.text
+                save_data(data)
+                bot.send_message(user_id, f"✅ تم تعيين القناة: {message.text}")
+            elif state == 'awaiting_reaction_add': 
+                data.setdefault("reactions", {})[message.text.strip()] = 1
+                save_data(data)
+                bot.send_message(user_id, f'✅ تم إضافة التفاعل: {message.text.strip()}')
+            elif state == 'awaiting_reaction_delete':
+                if message.text.strip() in data.get("reactions", {}): 
+                    del data["reactions"][message.text.strip()]
+                    save_data(data)
+                    bot.send_message(user_id, f'🗑️ تم حذف التفاعل: {message.text.strip()}')
+                else: 
+                    bot.send_message(user_id, '❌ التفاعل غير موجود أصلاً.')
+            elif state == 'awaiting_start_message':
+                data['start_message'] = message.text
+                save_data(data)
+                bot.send_message(user_id, f"✅ تم حفظ كليشة الاستارت بنجاح!\n\nمعاينة:\n{message.text}")
+        else:
+            if state.startswith('awaiting_custom_reaction_'):
+                chat_id = state.split('_')[3]
+                emoji = message.text.strip()
+                data.setdefault("user_custom_reactions", {}).setdefault(str(user_id), {}).setdefault(str(chat_id), []).append(emoji)
+                save_data(data)
+                admin_states.pop(user_id)
+                bot.send_message(user_id, f"✅ تم إضافة التفاعل: {emoji}")
+            elif state.startswith('awaiting_delete_custom_reaction_'):
+                chat_id = state.split('_')[4]
+                emoji = message.text.strip()
+                user_reactions = data.get("user_custom_reactions", {}).get(str(user_id), {}).get(str(chat_id), [])
+                if emoji in user_reactions:
+                    user_reactions.remove(emoji)
+                    data["user_custom_reactions"][str(user_id)][str(chat_id)] = user_reactions
+                    save_data(data)
+                    admin_states.pop(user_id)
+                    bot.send_message(user_id, f"🗑️ تم حذف التفاعل: {emoji}")
+                else:
+                    admin_states.pop(user_id)
+                    bot.send_message(user_id, "❌ التفاعل غير موجود في قائمتك.")
+
+print("البوت يعمل الآن...")
+bot.infinity_polling()
